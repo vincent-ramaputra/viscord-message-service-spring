@@ -20,10 +20,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: vincentramaputra/viscord-message-service
+          tags: |
+            type=sha
       - name: Build the docker image
         uses: docker/build-push-action@v7
         with:
           push: true
-          tags: ${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           
