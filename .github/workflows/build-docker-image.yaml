@@ -24,6 +24,6 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           
