@@ -1,4 +1,4 @@
-name: CI for develop
+name: Run tests
 
 on:
   pull_request:
