@@ -1,0 +1,19 @@
+name: CI for develop
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+jobs:
+  test:
+    runs-on: ubuntu/latest
+    steps:
+      - uses: actions/checkout
+      - name: Setup JDK
+        uses: actions/setup-java
+        with:
+          java-version: 17
+          distribution: temurin
+      - name: Run tests
+        run: ./mvnw clean verify
