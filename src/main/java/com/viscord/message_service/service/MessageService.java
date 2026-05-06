@@ -3,25 +3,19 @@ package com.viscord.message_service.service;
 import com.viscord.message_service.dto.CreateMessageRequest;
 import com.viscord.message_service.dto.EditMessageRequest;
 import com.viscord.message_service.dto.MessageResponse;
-import com.viscord.message_service.enums.StorageCategory;
+import com.viscord.message_service.enums.StoragePath;
 import com.viscord.message_service.exception.BadRequestException;
 import com.viscord.message_service.exception.ForbiddenException;
 import com.viscord.message_service.exception.NotFoundException;
 import com.viscord.message_service.grpc.*;
 import com.viscord.message_service.mapper.MessageMapper;
-import com.viscord.message_service.mapper.MessageMentionMapper;
 import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
 import com.viscord.message_service.model.message.MessageMention;
 import com.viscord.message_service.repository.MessageRepository;
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
 import net.devh.boot.grpc.client.inject.GrpcClient;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
@@ -105,7 +99,7 @@ public class MessageService {
                 att.setMessage(message);
                 att.setMessageId(message.getId());
 
-                String key = storageService.uploadFile(file, StorageCategory.ATTACHMENT, message.getId().toString());
+                String key = storageService.uploadFile(file, StoragePath.ATTACHMENT, message.getId().toString());
                 att.setUrl(key);
 
                 message.addAttachment(att);
@@ -163,7 +157,7 @@ public class MessageService {
                 boolean shouldRemove = !request.getAttachments().contains(attachment.getId());
                 System.out.println("Should remove: " + shouldRemove);
                 if (shouldRemove) {
-                    storageService.deleteFile(attachment.getUrl());
+//                    storageService.deleteFile(attachment.getUrl());
                 }
                 return shouldRemove;
             });

@@ -1,8 +1,9 @@
 package com.viscord.message_service.service;
 
-import com.viscord.message_service.enums.StorageCategory;
-import io.awspring.cloud.s3.S3Resource;
-import io.awspring.cloud.s3.S3Template;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.Storage;
+import com.viscord.message_service.enums.StoragePath;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -16,32 +17,35 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class StorageService {
 
-    @Value("${spring.cloud.aws.s3.bucket}")
+    @Value("${gcs.bucket}")
     private String bucketName;
 
-    private final S3Template s3Template;
+    private final Storage storage;
 
-    public String uploadFile(MultipartFile file, StorageCategory type, String entityId) {
+    public String uploadFile(MultipartFile file, StoragePath type, String entityId) {
         String extension = StringUtils.getFilenameExtension(file.getOriginalFilename());
         String key = String.format("%s/%s/%s", type.getPath(), entityId, UUID.randomUUID() + "." + extension);
 
         try {
-             this.s3Template.upload(this.bucketName, key, file.getInputStream());
+            BlobId blobId = BlobId.of(this.bucketName, key);
+            BlobInfo blobInfo = BlobInfo.newBuilder(blobId)
+                    .setContentType(file.getContentType())
+                    .build();
 
+            this.storage.createFrom(blobInfo, file.getInputStream());
             return key;
         } catch (IOException e) {
             throw new RuntimeException("Failed to read file input stream", e);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to upload to AWS S3", e);
+            throw new RuntimeException("Failed to upload to GCS", e);
         }
     }
 
-
     public void deleteFile(String key) {
         try {
-            this.s3Template.deleteObject(this.bucketName, key);
+            this.storage.delete(BlobId.of(this.bucketName, key));
         } catch (Exception e) {
-            throw new RuntimeException("Failed to delete file from S3 bucket", e);
+            throw new RuntimeException("Failed to delete file from GCS bucket", e);
         }
     }
 }
