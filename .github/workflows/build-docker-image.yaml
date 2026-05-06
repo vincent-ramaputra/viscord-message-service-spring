@@ -1,4 +1,4 @@
-name: Build and push Docker image
+name: Build and deploy image to development cluster
 
 on:
   push:
@@ -28,4 +28,27 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: Laevateinn17/viscord-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+      - name: Install kustomize
+        run: |
+          curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+      - name: Update image tag
+        run: |
+          cd infra/k8s/apps/message-service/overlays/dev
+          IMAGE_TAG=${{ steps.meta.outputs.version }}
+          kustomize edit set image vincentramaputra/viscord-message-service:$IMAGE_TAG
+      - name: Commit and push to infra repo
+        run: |
+          IMAGE_TAG=${{ steps.meta.outputs.version }}
+          cd infra
+          git config user.name "ci-bot"
+          git config user.email "ci@bot"
+          git add .
+          git commit -m "update: updated message-service image tag to $IMAGE_TAG"
+          git push
