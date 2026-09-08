@@ -40,7 +40,7 @@ jobs:
           sudo mv kustomize /usr/local/bin/
       - name: Update image tag
         run: |
-          cd infra/k8s/apps/message-service/overlays/dev
+          cd infra/k8s/services/message-service/overlays/dev
           IMAGE_TAG=${{ steps.meta.outputs.version }}
           kustomize edit set image vincentramaputra/viscord-message-service:$IMAGE_TAG
       - name: Commit and push to infra repo
