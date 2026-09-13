@@ -67,6 +67,25 @@ public class MessageService {
         return this.messageMapper.toDto(this.messageRepository.findAllByChannelIdOrderByCreatedAtAsc(channelId));
     }
 
+    public long getUnreadCount(UUID channelId, UUID lastReadId) {
+        if (channelId == null) {
+            throw new BadRequestException("Invalid channel ID");
+        }
+
+        if (lastReadId == null) {
+            return this.messageRepository.countByChannelId(channelId);
+        }
+
+        Message lastRead = this.messageRepository.findById(lastReadId)
+                .orElseThrow(() -> new NotFoundException("Last read message not found"));
+
+        if (!lastRead.getChannelId().equals(channelId)) {
+            throw new BadRequestException("Last read message does not belong to this channel");
+        }
+
+        return this.messageRepository.countByChannelIdAndCreatedAtAfter(channelId, lastRead.getCreatedAt());
+    }
+
     public MessageResponse createMessage(CreateMessageRequest request) {
         boolean isContentEmpty = request.getContent() == null || request.getContent().isBlank();
         boolean isAttachmentEmpty = request.getAttachments() == null || request.getAttachments().stream().allMatch(file -> file.getSize() == 0);

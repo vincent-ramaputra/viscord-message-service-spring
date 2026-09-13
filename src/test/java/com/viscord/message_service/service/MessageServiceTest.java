@@ -32,6 +32,7 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -328,5 +329,59 @@ public class MessageServiceTest {
         });
 
         Mockito.verify(messageRepository, Mockito.never()).findById(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Happy path: given no last read message, should count every message in the channel")
+    void getUnreadCount_NoLastRead_CountsAllMessages() {
+        UUID channelId = UUID.randomUUID();
+
+        Mockito.when(messageRepository.countByChannelId(channelId)).thenReturn(7L);
+
+        long count = messageService.getUnreadCount(channelId, null);
+
+        Assertions.assertEquals(7L, count);
+        Mockito.verify(messageRepository, Mockito.never()).findById(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Happy path: given last read message, should count messages created after it")
+    void getUnreadCount_WithLastRead_CountsMessagesAfterIt() {
+        Message lastRead = this.createMessage("read");
+        lastRead.setCreatedAt(Instant.parse("2026-09-01T10:00:00Z"));
+
+        Mockito.when(messageRepository.findById(lastRead.getId())).thenReturn(Optional.of(lastRead));
+        Mockito.when(messageRepository.countByChannelIdAndCreatedAtAfter(lastRead.getChannelId(), lastRead.getCreatedAt()))
+                .thenReturn(3L);
+
+        long count = messageService.getUnreadCount(lastRead.getChannelId(), lastRead.getId());
+
+        Assertions.assertEquals(3L, count);
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given unknown last read message, should throw not found")
+    void getUnreadCount_UnknownLastRead_ThrowsNotFound() {
+        UUID lastReadId = UUID.randomUUID();
+
+        Mockito.when(messageRepository.findById(lastReadId)).thenReturn(Optional.empty());
+
+        Assertions.assertThrows(NotFoundException.class, () -> {
+            messageService.getUnreadCount(UUID.randomUUID(), lastReadId);
+        });
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given last read message from another channel, should throw bad request")
+    void getUnreadCount_LastReadFromOtherChannel_ThrowsBadRequest() {
+        Message lastRead = this.createMessage("other channel");
+
+        Mockito.when(messageRepository.findById(lastRead.getId())).thenReturn(Optional.of(lastRead));
+
+        Assertions.assertThrows(BadRequestException.class, () -> {
+            messageService.getUnreadCount(UUID.randomUUID(), lastRead.getId());
+        });
+
+        Mockito.verify(messageRepository, Mockito.never()).countByChannelIdAndCreatedAtAfter(Mockito.any(), Mockito.any());
     }
 }

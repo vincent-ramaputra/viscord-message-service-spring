@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package messages;
+option java_package = "com.viscord.message_service.grpc";
+option java_multiple_files = true;
+option java_outer_classname = "MessagesProto";
+
+// Consumed by guild-service (src/proto/messages.proto) — keep both copies in sync.
+service MessagesService {
+    rpc GetUnreadCount(GetUnreadCountRequest) returns (GetUnreadCountResponse);
+}
+
+message GetUnreadCountRequest {
+    string channelId = 1;
+    // Empty means the user has never read the channel: every message counts as unread.
+    string lastReadId = 2;
+}
+
+message GetUnreadCountResponse {
+    int32 status = 1;
+    int32 data = 2;
+}
