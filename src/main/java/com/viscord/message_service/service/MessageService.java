@@ -1,47 +1,89 @@
 package com.viscord.message_service.service;
 
 import com.viscord.message_service.dto.CreateMessageRequest;
+import com.viscord.message_service.dto.EditMessageRequest;
 import com.viscord.message_service.dto.MessageResponse;
-import com.viscord.message_service.enums.StorageCategory;
+import com.viscord.message_service.enums.StoragePath;
 import com.viscord.message_service.exception.BadRequestException;
 import com.viscord.message_service.exception.ForbiddenException;
 import com.viscord.message_service.exception.NotFoundException;
 import com.viscord.message_service.grpc.*;
 import com.viscord.message_service.mapper.MessageMapper;
-import com.viscord.message_service.mapper.MessageMentionMapper;
 import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
 import com.viscord.message_service.model.message.MessageMention;
 import com.viscord.message_service.repository.MessageRepository;
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
 import net.devh.boot.grpc.client.inject.GrpcClient;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.UUID;
 
 @Service
-@RequiredArgsConstructor
 public class MessageService {
     private final MessageRepository messageRepository;
     private final MessageMapper messageMapper;
     private final StorageService storageService;
+    private final ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub;
 
-    @GrpcClient("guild-service")
-    private ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub;
+    public MessageService(
+            MessageRepository messageRepository,
+            MessageMapper messageMapper,
+            StorageService storageService,
+            @GrpcClient("guild-service") ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub
+    ) {
+        this.channelStub = channelStub;
+        this.messageRepository = messageRepository;
+        this.messageMapper = messageMapper;
+        this.storageService = storageService;
+    }
 
     public List<MessageResponse> getAllMessages() {
         return messageMapper.toDto(messageRepository.findAll());
     }
 
-    public List<MessageResponse> getChannelMessages(UUID channelId) {
-        return messageMapper.toDto(messageRepository.findAllByChannelIdOrderByCreatedAtAsc(channelId));
+    public List<MessageResponse> getChannelMessages(UUID userId, UUID channelId) {
+        if (channelId == null) {
+            throw new BadRequestException("Invalid channel ID");
+        }
+
+        if (userId == null) {
+            throw new BadRequestException("Invalid user ID");
+        }
+
+        CheckPermissionResponse response = channelStub.checkPermission(
+                CheckPermissionRequest.newBuilder()
+                        .setChannelId(channelId.toString())
+                        .setUserId(userId.toString())
+                        .addPermissions(Permission.VIEW_CHANNELS).build()
+        );
+
+        if (!response.getAllowed()) {
+            throw new ForbiddenException("User is not allowed to perform this action");
+        }
+
+        return this.messageMapper.toDto(this.messageRepository.findAllByChannelIdOrderByCreatedAtAsc(channelId));
+    }
+
+    public long getUnreadCount(UUID channelId, UUID lastReadId) {
+        if (channelId == null) {
+            throw new BadRequestException("Invalid channel ID");
+        }
+
+        if (lastReadId == null) {
+            return this.messageRepository.countByChannelId(channelId);
+        }
+
+        Message lastRead = this.messageRepository.findById(lastReadId)
+                .orElseThrow(() -> new NotFoundException("Last read message not found"));
+
+        if (!lastRead.getChannelId().equals(channelId)) {
+            throw new BadRequestException("Last read message does not belong to this channel");
+        }
+
+        return this.messageRepository.countByChannelIdAndCreatedAtAfter(channelId, lastRead.getCreatedAt());
     }
 
     public MessageResponse createMessage(CreateMessageRequest request) {
@@ -76,7 +118,7 @@ public class MessageService {
                 att.setMessage(message);
                 att.setMessageId(message.getId());
 
-                String key = storageService.uploadFile(file, StorageCategory.ATTACHMENT, message.getId().toString());
+                String key = storageService.uploadFile(file, StoragePath.ATTACHMENT, message.getId().toString());
                 att.setUrl(key);
 
                 message.addAttachment(att);
@@ -112,6 +154,37 @@ public class MessageService {
             throw new ForbiddenException("User is not allowed to perform this action");
         }
         messageRepository.delete(message);
+    }
+
+    public MessageResponse editMessage(EditMessageRequest request) {
+        if ((request.getContent() == null || request.getContent().trim().isBlank()) && request.getAttachments() == null) {
+            throw new BadRequestException("Content cannot be empty");
+        }
+
+        Message message = messageRepository.findById(request.getMessageId()).orElseThrow(() -> new NotFoundException("Invalid message ID"));
+
+        if (!message.getSenderId().equals(request.getUserId())) {
+            throw new ForbiddenException("Only the author is allowed to perform this action");
+        }
+
+        if (request.getContent() != null) {
+            message.setContent(request.getContent().trim());
+        }
+
+        if (request.getAttachments() != null) {
+            message.getAttachments().removeIf(attachment -> {
+                boolean shouldRemove = !request.getAttachments().contains(attachment.getId());
+                System.out.println("Should remove: " + shouldRemove);
+                if (shouldRemove) {
+//                    storageService.deleteFile(attachment.getUrl());
+                }
+                return shouldRemove;
+            });
+        }
+
+        messageRepository.save(message);
+
+        return messageMapper.toDto(message);
     }
 
 }

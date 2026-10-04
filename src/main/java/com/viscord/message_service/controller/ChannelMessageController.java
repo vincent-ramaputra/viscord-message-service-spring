@@ -2,6 +2,7 @@ package com.viscord.message_service.controller;
 
 
 import com.viscord.message_service.dto.CreateMessageRequest;
+import com.viscord.message_service.dto.EditMessageRequest;
 import com.viscord.message_service.dto.MessageResponse;
 import com.viscord.message_service.service.MessageService;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -26,8 +27,11 @@ public class ChannelMessageController {
     }
 
     @GetMapping
-    public ResponseEntity<List<MessageResponse>> getChannelMessages(@PathVariable UUID channelId) {
-        return ResponseEntity.ok(messageService.getChannelMessages(channelId));
+    public ResponseEntity<List<MessageResponse>> getChannelMessages(
+            @RequestHeader("X-User-Id") UUID userId,
+            @PathVariable UUID channelId
+    ) {
+        return ResponseEntity.ok(messageService.getChannelMessages(userId, channelId));
     }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -52,5 +56,16 @@ public class ChannelMessageController {
         messageService.deleteMessage(userId, messageId);
 
         return ResponseEntity.noContent().build();
+    }
+
+    @PatchMapping("/{messageId}")
+    public ResponseEntity<MessageResponse> editMessage(
+            @RequestHeader("X-User-Id") UUID userId,
+            @PathVariable UUID messageId,
+            @RequestBody EditMessageRequest request) {
+        request.setMessageId(messageId);
+        request.setUserId(userId);
+
+        return ResponseEntity.status(HttpStatus.OK).body(messageService.editMessage(request));
     }
 }

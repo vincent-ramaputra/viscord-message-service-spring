@@ -1,0 +1,54 @@
+name: Build and deploy image to development cluster
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to Docker hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: vincentramaputra/viscord-message-service
+          tags: |
+            type=sha
+      - name: Build the docker image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: Laevateinn17/viscord-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+      - name: Install kustomize
+        run: |
+          curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+      - name: Update image tag
+        run: |
+          cd infra/k8s/services/message-service/overlays/dev
+          IMAGE_TAG=${{ steps.meta.outputs.version }}
+          kustomize edit set image vincentramaputra/viscord-message-service:$IMAGE_TAG
+      - name: Commit and push to infra repo
+        run: |
+          IMAGE_TAG=${{ steps.meta.outputs.version }}
+          cd infra
+          git config user.name "ci-bot"
+          git config user.email "ci@bot"
+          git add .
+          git commit -m "update: updated message-service image tag to $IMAGE_TAG"
+          git push
