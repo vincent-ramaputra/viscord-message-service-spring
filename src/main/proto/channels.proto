@@ -13,6 +13,7 @@ service ChannelsService {
   rpc GetChannelById (GetChannelByIdRequest) returns (GetChannelByIdResponse);
   rpc IsUserChannelParticipant (IsUserChannelParticipantRequest) returns (IsUserChannelParticipantResponse);
   rpc CanUserSendMessage (CanUserSendMessageRequest) returns (CanUserSendMessageResponse);
+  rpc CanUserGetChannelMessages (CanUserGetChannelMessagesRequest) returns (CanUserGetChannelMessagesResponse);
   rpc CanUserDeleteMessage (CanUserDeleteMessageRequest) returns (CanUserDeleteMessageResponse);
   rpc CheckPermission (CheckPermissionRequest) returns (CheckPermissionResponse);
 }
