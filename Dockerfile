@@ -27,6 +27,6 @@ WORKDIR /app
 
 COPY --from=build /app/target/auth-service.jar   .
 
-EXPOSE 8080
+EXPOSE 8080 9090
 
 CMD ["java", "-jar", "auth-service.jar"]
