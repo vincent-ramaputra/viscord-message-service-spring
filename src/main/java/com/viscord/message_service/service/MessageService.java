@@ -58,15 +58,15 @@ public class MessageService {
             throw new BadRequestException("Invalid user ID");
         }
 
-        CheckPermissionResponse response = channelStub.checkPermission(
-                CheckPermissionRequest.newBuilder()
-                        .setChannelId(channelId.toString())
-                        .setUserId(userId.toString())
-                        .addPermissions(Permission.VIEW_CHANNELS).build()
-        );
+        CanUserGetChannelMessagesResponse response = channelStub.canUserGetChannelMessages(CanUserGetChannelMessagesRequest.newBuilder()
+                .setChannelId(channelId.toString())
+                .setUserId(userId.toString())
+                .build());
 
-        if (!response.getAllowed()) {
-            throw new ForbiddenException("User is not allowed to perform this action");
+        if (!response.getData()) {
+            if (response.getStatus() == HttpStatus.BAD_REQUEST.value())
+                throw new BadRequestException(response.getMessage());
+            throw new ForbiddenException(response.getMessage());
         }
 
         return this.messageMapper.toDto(this.messageRepository.findAllByChannelIdOrderByCreatedAtAsc(channelId));
