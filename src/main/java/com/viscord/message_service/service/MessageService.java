@@ -9,11 +9,13 @@ import com.viscord.message_service.exception.ForbiddenException;
 import com.viscord.message_service.exception.NotFoundException;
 import com.viscord.message_service.grpc.*;
 import com.viscord.message_service.mapper.MessageMapper;
+import com.viscord.message_service.messaging.MessageCreatedEvent;
 import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
 import com.viscord.message_service.model.message.MessageMention;
 import com.viscord.message_service.repository.MessageRepository;
 import net.devh.boot.grpc.client.inject.GrpcClient;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -27,14 +29,17 @@ public class MessageService {
     private final MessageMapper messageMapper;
     private final StorageService storageService;
     private final ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub;
+    private final ApplicationEventPublisher eventPublisher;
 
     public MessageService(
             MessageRepository messageRepository,
             MessageMapper messageMapper,
             StorageService storageService,
-            @GrpcClient("guild-service") ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub
+            @GrpcClient("guild-service") ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub,
+            ApplicationEventPublisher eventPublisher
     ) {
         this.channelStub = channelStub;
+        this.eventPublisher = eventPublisher;
         this.messageRepository = messageRepository;
         this.messageMapper = messageMapper;
         this.storageService = storageService;
@@ -137,7 +142,9 @@ public class MessageService {
         }
         message = messageRepository.save(message);
 
-        return messageMapper.toDto(message);
+        MessageResponse result = messageMapper.toDto(message);
+        eventPublisher.publishEvent(new MessageCreatedEvent(result));
+        return result;
     }
 
     public void deleteMessage(UUID userId, UUID messageId) {

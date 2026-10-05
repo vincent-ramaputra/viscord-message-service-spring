@@ -12,6 +12,7 @@ import com.viscord.message_service.grpc.ChannelsServiceGrpc;
 import com.viscord.message_service.grpc.CheckPermissionResponse;
 import com.viscord.message_service.mapper.AttachmentMapper;
 import com.viscord.message_service.mapper.MessageMapper;
+import com.viscord.message_service.messaging.MessageCreatedEvent;
 import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
 import com.viscord.message_service.repository.MessageRepository;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mapstruct.factory.Mappers;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -54,6 +56,9 @@ public class MessageServiceTest {
 
     @Mock
     private StorageService storageService;
+
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     @InjectMocks
     private MessageService messageService;
@@ -169,6 +174,7 @@ public class MessageServiceTest {
         });
 
         Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
+        Mockito.verify(eventPublisher, Mockito.never()).publishEvent(Mockito.any(Object.class));
     }
 
     @Test
@@ -234,6 +240,7 @@ public class MessageServiceTest {
         Assertions.assertNotNull(result);
         Assertions.assertEquals(req.getSenderId(), result.getSenderId());
         Assertions.assertEquals(req.getContent(), result.getContent());
+        Mockito.verify(eventPublisher).publishEvent(new MessageCreatedEvent(result));
     }
 
     @Test
