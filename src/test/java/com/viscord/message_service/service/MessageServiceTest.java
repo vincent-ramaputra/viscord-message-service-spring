@@ -9,7 +9,7 @@ import com.viscord.message_service.exception.NotFoundException;
 import com.viscord.message_service.grpc.CanUserDeleteMessageResponse;
 import com.viscord.message_service.grpc.CanUserSendMessageResponse;
 import com.viscord.message_service.grpc.ChannelsServiceGrpc;
-import com.viscord.message_service.grpc.CheckPermissionResponse;
+import com.viscord.message_service.grpc.CanUserGetChannelMessagesResponse;
 import com.viscord.message_service.mapper.AttachmentMapper;
 import com.viscord.message_service.mapper.MessageMapper;
 import com.viscord.message_service.model.message.Attachment;
@@ -80,6 +80,14 @@ public class MessageServiceTest {
                 .build();
     }
 
+    private CanUserGetChannelMessagesResponse createCanUserGetChannelMessagesResponse(boolean allowed, int status, String msg) {
+        return CanUserGetChannelMessagesResponse.newBuilder()
+                .setData(allowed)
+                .setMessage(msg)
+                .setStatus(status)
+                .build();
+    }
+
     private Message createMessage(String content) {
         Message message = new Message();
         message.setContent(content);
@@ -111,11 +119,27 @@ public class MessageServiceTest {
 
         List<Message> messages = List.of(message);
 
-        Mockito.when(channelStub.checkPermission(Mockito.any())).thenReturn(
-                CheckPermissionResponse.newBuilder().setAllowed(false).build());
+        Mockito.when(channelStub.canUserGetChannelMessages(Mockito.any())).thenReturn(
+                createCanUserGetChannelMessagesResponse(false, HttpStatus.FORBIDDEN.value(), "User is not a recipient of this channel"));
 
         Assertions.assertThrows(ForbiddenException.class, () -> {
             List<MessageResponse> result = messageService.getChannelMessages(userId, channelId);
+        });
+
+        Mockito.verify(this.messageRepository, Mockito.never()).findAllByChannelIdOrderByCreatedAtAsc(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given invalid channel or user ID, should throw bad request error")
+    void getChannelMessages_InvalidChannel_ThrowsBadRequest() {
+        UUID userId = UUID.randomUUID();
+        UUID channelId = UUID.randomUUID();
+
+        Mockito.when(channelStub.canUserGetChannelMessages(Mockito.any())).thenReturn(
+                createCanUserGetChannelMessagesResponse(false, HttpStatus.BAD_REQUEST.value(), "Invalid channel or user ID"));
+
+        Assertions.assertThrows(BadRequestException.class, () -> {
+            messageService.getChannelMessages(userId, channelId);
         });
 
         Mockito.verify(this.messageRepository, Mockito.never()).findAllByChannelIdOrderByCreatedAtAsc(Mockito.any());
@@ -133,8 +157,8 @@ public class MessageServiceTest {
         List<Message> messages = List.of(message);
 
         Mockito.when(messageRepository.findAllByChannelIdOrderByCreatedAtAsc(channelId)).thenReturn(messages);
-        Mockito.when(channelStub.checkPermission(Mockito.any())).thenReturn(
-                CheckPermissionResponse.newBuilder().setAllowed(true).build());
+        Mockito.when(channelStub.canUserGetChannelMessages(Mockito.any())).thenReturn(
+                createCanUserGetChannelMessagesResponse(true, HttpStatus.OK.value(), ""));
 
         List<MessageResponse> result = messageService.getChannelMessages(userId, channelId);
 
