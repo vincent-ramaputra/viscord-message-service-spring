@@ -14,6 +14,7 @@ import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
 import com.viscord.message_service.model.message.MessageMention;
 import com.viscord.message_service.repository.MessageRepository;
+import io.grpc.Status;
 import net.devh.boot.grpc.client.inject.GrpcClient;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
@@ -192,6 +193,29 @@ public class MessageService {
         messageRepository.save(message);
 
         return messageMapper.toDto(message);
+    }
+
+    public void acknowledgeMessage(UUID userId, UUID channelId, UUID messageId) {
+        Message message = this.messageRepository.findById(messageId).orElseThrow(() -> new NotFoundException("Message not found"));
+        if (!message.getChannelId().equals(channelId)) throw new BadRequestException("Invalid channel id");
+
+        AcknowledgeMessageResponse response = this.channelStub.acknowledgeMessage(AcknowledgeMessageRequest.newBuilder()
+                .setUserId(userId.toString())
+                .setChannelId(channelId.toString())
+                .setMessageId(messageId.toString())
+                .build());
+
+        int status = response.getStatus();
+        if (status == HttpStatus.NO_CONTENT.value()) return;
+        if (status == HttpStatus.BAD_REQUEST.value()) throw new BadRequestException(response.getMessage());
+        if (status == HttpStatus.FORBIDDEN.value()) throw new ForbiddenException(response.getMessage());
+
+        // guild-service failed (5xx) or sent a status we don't expect. That isn't the client's fault, so
+        // surface it as a downstream failure: GlobalExceptionHandler turns INTERNAL into a 502 and keeps
+        // guild-service's message out of the response body.
+        throw Status.INTERNAL
+                .withDescription("AcknowledgeMessage returned status " + status + ": " + response.getMessage())
+                .asRuntimeException();
     }
 
 }

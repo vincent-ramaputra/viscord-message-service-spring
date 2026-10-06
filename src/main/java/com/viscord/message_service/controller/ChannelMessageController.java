@@ -68,4 +68,16 @@ public class ChannelMessageController {
 
         return ResponseEntity.status(HttpStatus.OK).body(messageService.editMessage(request));
     }
+
+    @PostMapping("/{messageId}/ack")
+    public ResponseEntity<Void> acknowledgeMessage(
+            @RequestHeader("X-User-Id") UUID userId,
+            @PathVariable UUID channelId,
+            @PathVariable UUID messageId
+    ) {
+
+        this.messageService.acknowledgeMessage(userId, channelId, messageId);
+
+        return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
+    }
 }
