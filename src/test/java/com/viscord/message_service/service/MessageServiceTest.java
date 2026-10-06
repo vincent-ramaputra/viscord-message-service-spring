@@ -1,5 +1,8 @@
 package com.viscord.message_service.service;
 
+import com.viscord.message_service.config.StorageProperties;
+import com.viscord.message_service.dto.CreateAttachmentRequest;
+import com.viscord.message_service.dto.CreateAttachmentResponse;
 import com.viscord.message_service.dto.CreateMessageRequest;
 import com.viscord.message_service.dto.EditMessageRequest;
 import com.viscord.message_service.dto.MessageResponse;
@@ -8,6 +11,8 @@ import com.viscord.message_service.exception.ForbiddenException;
 import com.viscord.message_service.exception.NotFoundException;
 import com.viscord.message_service.grpc.AcknowledgeMessageRequest;
 import com.viscord.message_service.grpc.AcknowledgeMessageResponse;
+import com.viscord.message_service.grpc.CanUserAttachFilesRequest;
+import com.viscord.message_service.grpc.CanUserAttachFilesResponse;
 import com.viscord.message_service.grpc.CanUserDeleteMessageResponse;
 import com.viscord.message_service.grpc.CanUserSendMessageResponse;
 import com.viscord.message_service.grpc.ChannelsServiceGrpc;
@@ -36,10 +41,14 @@ import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.net.URL;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -541,6 +550,182 @@ public class MessageServiceTest {
         });
 
         Assertions.assertEquals(Status.Code.UNAVAILABLE, e.getStatus().getCode());
+    }
+
+    private static final DataSize MAX_FILE_SIZE = DataSize.ofMegabytes(25);
+
+    /**
+     * The @InjectMocks instance gets null StorageProperties, so attachment tests build their own
+     * service with explicit limits. Production allows every content type (*\/*), so tests that need
+     * a rejected type pass a narrower list.
+     */
+    private MessageService attachmentService(MediaType... allowedContentTypes) {
+        StorageProperties properties = new StorageProperties(Duration.ofMinutes(5), null, MAX_FILE_SIZE, List.of(allowedContentTypes));
+        return new MessageService(messageRepository, messageMapper, storageService, channelStub, eventPublisher, properties);
+    }
+
+    private CreateAttachmentRequest createAttachmentRequest(CreateAttachmentRequest.AttachmentMetadata... files) {
+        CreateAttachmentRequest request = new CreateAttachmentRequest();
+        request.setUserId(UUID.randomUUID());
+        request.setChannelId(UUID.randomUUID());
+        request.setFiles(List.of(files));
+        return request;
+    }
+
+    private CreateAttachmentRequest.AttachmentMetadata file(int id, String fileName, String contentType, long size) {
+        return new CreateAttachmentRequest.AttachmentMetadata(size, fileName, contentType, id);
+    }
+
+    private CanUserAttachFilesResponse createCanUserAttachFilesResponse(int status, String msg) {
+        return CanUserAttachFilesResponse.newBuilder()
+                .setStatus(status)
+                .setData(status == HttpStatus.OK.value())
+                .setMessage(msg)
+                .build();
+    }
+
+    private void stubAnyPresignedUpload() throws Exception {
+        Mockito.when(storageService.createPutPresignedURL(Mockito.any(), Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(new StorageService.PresignedUpload("pending/u/key", new URL("https://storage.test/upload"), Instant.now()));
+    }
+
+    private void assertNothingRequested() {
+        Mockito.verify(channelStub, Mockito.never()).canUserAttachFiles(Mockito.any());
+        Mockito.verifyNoInteractions(storageService);
+    }
+
+    @Test
+    @DisplayName("Happy path: given allowed files, should return one upload per file with the client's ids")
+    void createAttachment_ValidFiles_ReturnsUploadPerFile() throws Exception {
+        CreateAttachmentRequest request = createAttachmentRequest(
+                file(7, "cat.png", "image/png", 1024),
+                file(9, "notes.pdf", "application/pdf", 2048));
+        Instant expiresAt = Instant.parse("2026-10-06T15:05:00Z");
+        StorageService.PresignedUpload catUpload = new StorageService.PresignedUpload("pending/u/cat-key.png", new URL("https://storage.test/cat"), expiresAt);
+        StorageService.PresignedUpload notesUpload = new StorageService.PresignedUpload("pending/u/notes-key.pdf", new URL("https://storage.test/notes"), expiresAt);
+
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(HttpStatus.OK.value(), ""));
+        Mockito.when(storageService.createPutPresignedURL(request.getUserId(), "cat.png", "image/png")).thenReturn(catUpload);
+        Mockito.when(storageService.createPutPresignedURL(request.getUserId(), "notes.pdf", "application/pdf")).thenReturn(notesUpload);
+
+        CreateAttachmentResponse response = attachmentService(MediaType.ALL).createAttachment(request);
+
+        Assertions.assertEquals(List.of(
+                new CreateAttachmentResponse.AttachmentUpload(7, catUpload.key(), catUpload.url(), expiresAt),
+                new CreateAttachmentResponse.AttachmentUpload(9, notesUpload.key(), notesUpload.url(), expiresAt)
+        ), response.getAttachments());
+
+        ArgumentCaptor<CanUserAttachFilesRequest> captor = ArgumentCaptor.forClass(CanUserAttachFilesRequest.class);
+        Mockito.verify(channelStub).canUserAttachFiles(captor.capture());
+        Assertions.assertEquals(request.getUserId().toString(), captor.getValue().getUserId());
+        Assertions.assertEquals(request.getChannelId().toString(), captor.getValue().getChannelId());
+    }
+
+    @Test
+    @DisplayName("Edge case: given a file exactly at the size limit, should accept it")
+    void createAttachment_FileAtSizeLimit_IsAccepted() throws Exception {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "big.png", "image/png", MAX_FILE_SIZE.toBytes()));
+
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(HttpStatus.OK.value(), ""));
+        stubAnyPresignedUpload();
+
+        Assertions.assertDoesNotThrow(() -> attachmentService(MediaType.ALL).createAttachment(request));
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given a file over the size limit, should throw bad request before checking permissions")
+    void createAttachment_FileTooLarge_ThrowsBadRequest() {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "big.png", "image/png", MAX_FILE_SIZE.toBytes() + 1));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createAttachment(request));
+
+        assertNothingRequested();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not a type", "image/*", "*/*", "image/png; charset=binary"})
+    @DisplayName("Unhappy path: given a malformed or wildcard content type, should throw bad request before checking permissions")
+    void createAttachment_InvalidContentType_ThrowsBadRequest(String contentType) {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "file.png", contentType, 1024));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createAttachment(request));
+
+        assertNothingRequested();
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given a content type outside the allowlist, should throw bad request before checking permissions")
+    void createAttachment_ContentTypeNotAllowed_ThrowsBadRequest() {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "setup.exe", "application/x-msdownload", 1024));
+
+        Assertions.assertThrows(BadRequestException.class,
+                () -> attachmentService(MediaType.parseMediaType("image/*"), MediaType.APPLICATION_PDF).createAttachment(request));
+
+        assertNothingRequested();
+    }
+
+    @Test
+    @DisplayName("Happy path: given a content type matching a wildcard in the allowlist, should accept it regardless of case")
+    void createAttachment_ContentTypeMatchesWildcard_IsAccepted() throws Exception {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "cat.png", "IMAGE/PNG", 1024));
+
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(HttpStatus.OK.value(), ""));
+        stubAnyPresignedUpload();
+
+        Assertions.assertDoesNotThrow(() -> attachmentService(MediaType.parseMediaType("image/*")).createAttachment(request));
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given one invalid file among valid ones, should sign no uploads at all")
+    void createAttachment_OneInvalidFile_SignsNothing() {
+        CreateAttachmentRequest request = createAttachmentRequest(
+                file(0, "cat.png", "image/png", 1024),
+                file(1, "big.png", "image/png", MAX_FILE_SIZE.toBytes() + 1));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createAttachment(request));
+
+        assertNothingRequested();
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when the user can't attach files, should throw forbidden without signing uploads")
+    void createAttachment_PermissionDenied_ThrowsForbidden() {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "cat.png", "image/png", 1024));
+
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any()))
+                .thenReturn(createCanUserAttachFilesResponse(HttpStatus.FORBIDDEN.value(), "User is not allowed to attach files"));
+
+        ForbiddenException e = Assertions.assertThrows(ForbiddenException.class, () -> attachmentService(MediaType.ALL).createAttachment(request));
+
+        Assertions.assertEquals("User is not allowed to attach files", e.getMessage());
+        Mockito.verifyNoInteractions(storageService);
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when guild-service rejects the channel, should throw bad request without signing uploads")
+    void createAttachment_GuildServiceBadRequest_ThrowsBadRequest() {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "cat.png", "image/png", 1024));
+
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any()))
+                .thenReturn(createCanUserAttachFilesResponse(HttpStatus.BAD_REQUEST.value(), "Channel does not exist"));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createAttachment(request));
+
+        Mockito.verifyNoInteractions(storageService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 204, 500})
+    @DisplayName("Unhappy path: when guild-service fails or returns an unexpected status, should throw an INTERNAL gRPC error")
+    void createAttachment_UnexpectedStatus_ThrowsInternal(int status) {
+        CreateAttachmentRequest request = createAttachmentRequest(file(0, "cat.png", "image/png", 1024));
+
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(status, "boom"));
+
+        StatusRuntimeException e = Assertions.assertThrows(StatusRuntimeException.class, () -> attachmentService(MediaType.ALL).createAttachment(request));
+
+        Assertions.assertEquals(Status.Code.INTERNAL, e.getStatus().getCode());
+        Mockito.verifyNoInteractions(storageService);
     }
 
 }

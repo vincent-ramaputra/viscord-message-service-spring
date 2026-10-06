@@ -4,7 +4,8 @@ import lombok.Getter;
 
 @Getter
 public enum StoragePath {
-    ATTACHMENT("messages/attachments");
+    ATTACHMENT("messages/attachments"),
+    PENDING("pending");
 
 
     private final String path;
