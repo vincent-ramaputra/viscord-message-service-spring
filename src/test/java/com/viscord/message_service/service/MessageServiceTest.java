@@ -6,6 +6,8 @@ import com.viscord.message_service.dto.MessageResponse;
 import com.viscord.message_service.exception.BadRequestException;
 import com.viscord.message_service.exception.ForbiddenException;
 import com.viscord.message_service.exception.NotFoundException;
+import com.viscord.message_service.grpc.AcknowledgeMessageRequest;
+import com.viscord.message_service.grpc.AcknowledgeMessageResponse;
 import com.viscord.message_service.grpc.CanUserDeleteMessageResponse;
 import com.viscord.message_service.grpc.CanUserSendMessageResponse;
 import com.viscord.message_service.grpc.ChannelsServiceGrpc;
@@ -16,6 +18,8 @@ import com.viscord.message_service.messaging.MessageCreatedEvent;
 import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
 import com.viscord.message_service.repository.MessageRepository;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import jakarta.inject.Inject;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
@@ -25,6 +29,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mapstruct.factory.Mappers;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -415,4 +421,126 @@ public class MessageServiceTest {
 
         Mockito.verify(messageRepository, Mockito.never()).countByChannelIdAndCreatedAtAfter(Mockito.any(), Mockito.any());
     }
+
+    private AcknowledgeMessageResponse createAcknowledgeMessageResponse(int status, String msg) {
+        return AcknowledgeMessageResponse.newBuilder()
+                .setStatus(status)
+                .setMessage(msg)
+                .build();
+    }
+
+    @Test
+    @DisplayName("Happy path: given valid request, should forward the acknowledgement to guild-service")
+    void acknowledgeMessage_ValidRequest_SendsGrpcRequest() {
+        Message message = this.createMessage("test");
+        UUID userId = UUID.randomUUID();
+
+        Mockito.when(messageRepository.findById(message.getId())).thenReturn(Optional.of(message));
+        Mockito.when(channelStub.acknowledgeMessage(Mockito.any()))
+                .thenReturn(createAcknowledgeMessageResponse(HttpStatus.NO_CONTENT.value(), ""));
+
+        messageService.acknowledgeMessage(userId, message.getChannelId(), message.getId());
+
+        ArgumentCaptor<AcknowledgeMessageRequest> captor = ArgumentCaptor.forClass(AcknowledgeMessageRequest.class);
+        Mockito.verify(channelStub).acknowledgeMessage(captor.capture());
+        Assertions.assertEquals(userId.toString(), captor.getValue().getUserId());
+        Assertions.assertEquals(message.getChannelId().toString(), captor.getValue().getChannelId());
+        Assertions.assertEquals(message.getId().toString(), captor.getValue().getMessageId());
+
+        Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
+        Mockito.verifyNoInteractions(eventPublisher);
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given unknown message id, should throw not found")
+    void acknowledgeMessage_UnknownMessage_ThrowsNotFound() {
+        Mockito.when(messageRepository.findById(Mockito.any())).thenReturn(Optional.empty());
+
+        Assertions.assertThrows(NotFoundException.class, () -> {
+            messageService.acknowledgeMessage(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+        });
+
+        Mockito.verify(channelStub, Mockito.never()).acknowledgeMessage(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given message from another channel, should throw bad request")
+    void acknowledgeMessage_MessageFromOtherChannel_ThrowsBadRequest() {
+        Message message = this.createMessage("other channel");
+
+        Mockito.when(messageRepository.findById(message.getId())).thenReturn(Optional.of(message));
+
+        Assertions.assertThrows(BadRequestException.class, () -> {
+            messageService.acknowledgeMessage(UUID.randomUUID(), UUID.randomUUID(), message.getId());
+        });
+
+        Mockito.verify(channelStub, Mockito.never()).acknowledgeMessage(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when guild-service rejects the request, should throw bad request with its message")
+    void acknowledgeMessage_GuildServiceBadRequest_ThrowsBadRequest() {
+        Message message = this.createMessage("test");
+
+        Mockito.when(messageRepository.findById(message.getId())).thenReturn(Optional.of(message));
+        Mockito.when(channelStub.acknowledgeMessage(Mockito.any()))
+                .thenReturn(createAcknowledgeMessageResponse(HttpStatus.BAD_REQUEST.value(), "Channel does not exist"));
+
+        BadRequestException e = Assertions.assertThrows(BadRequestException.class, () -> {
+            messageService.acknowledgeMessage(UUID.randomUUID(), message.getChannelId(), message.getId());
+        });
+
+        Assertions.assertEquals("Channel does not exist", e.getMessage());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when user cannot view the channel, should throw forbidden")
+    void acknowledgeMessage_PermissionDenied_ThrowsForbidden() {
+        Message message = this.createMessage("test");
+
+        Mockito.when(messageRepository.findById(message.getId())).thenReturn(Optional.of(message));
+        Mockito.when(channelStub.acknowledgeMessage(Mockito.any()))
+                .thenReturn(createAcknowledgeMessageResponse(HttpStatus.FORBIDDEN.value(), "User does not have permission to read message"));
+
+        ForbiddenException e = Assertions.assertThrows(ForbiddenException.class, () -> {
+            messageService.acknowledgeMessage(UUID.randomUUID(), message.getChannelId(), message.getId());
+        });
+
+        Assertions.assertEquals("User does not have permission to read message", e.getMessage());
+    }
+
+    // 0 is what an unset proto3 int32 reads as; 200 is a success code, but not the one guild-service promises.
+    @ParameterizedTest
+    @ValueSource(ints = {0, 200, 500})
+    @DisplayName("Unhappy path: when guild-service fails or returns an unexpected status, should throw an INTERNAL gRPC error")
+    void acknowledgeMessage_UnexpectedStatus_ThrowsInternal(int status) {
+        Message message = this.createMessage("test");
+
+        Mockito.when(messageRepository.findById(message.getId())).thenReturn(Optional.of(message));
+        Mockito.when(channelStub.acknowledgeMessage(Mockito.any()))
+                .thenReturn(createAcknowledgeMessageResponse(status, "boom"));
+
+        StatusRuntimeException e = Assertions.assertThrows(StatusRuntimeException.class, () -> {
+            messageService.acknowledgeMessage(UUID.randomUUID(), message.getChannelId(), message.getId());
+        });
+
+        Assertions.assertEquals(Status.Code.INTERNAL, e.getStatus().getCode());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when guild-service is unreachable, should propagate the gRPC error unchanged")
+    void acknowledgeMessage_GuildServiceUnavailable_PropagatesGrpcError() {
+        Message message = this.createMessage("test");
+
+        Mockito.when(messageRepository.findById(message.getId())).thenReturn(Optional.of(message));
+        Mockito.when(channelStub.acknowledgeMessage(Mockito.any()))
+                .thenThrow(Status.UNAVAILABLE.asRuntimeException());
+
+        StatusRuntimeException e = Assertions.assertThrows(StatusRuntimeException.class, () -> {
+            messageService.acknowledgeMessage(UUID.randomUUID(), message.getChannelId(), message.getId());
+        });
+
+        Assertions.assertEquals(Status.Code.UNAVAILABLE, e.getStatus().getCode());
+    }
+
 }
