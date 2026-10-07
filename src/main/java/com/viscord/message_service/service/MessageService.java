@@ -1,8 +1,7 @@
 package com.viscord.message_service.service;
 
-import com.viscord.message_service.dto.CreateMessageRequest;
-import com.viscord.message_service.dto.EditMessageRequest;
-import com.viscord.message_service.dto.MessageResponse;
+import com.viscord.message_service.config.StorageProperties;
+import com.viscord.message_service.dto.*;
 import com.viscord.message_service.enums.StoragePath;
 import com.viscord.message_service.exception.BadRequestException;
 import com.viscord.message_service.exception.ForbiddenException;
@@ -18,9 +17,13 @@ import io.grpc.Status;
 import net.devh.boot.grpc.client.inject.GrpcClient;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -31,16 +34,19 @@ public class MessageService {
     private final StorageService storageService;
     private final ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub;
     private final ApplicationEventPublisher eventPublisher;
+    private final StorageProperties storageProperties;
 
     public MessageService(
             MessageRepository messageRepository,
             MessageMapper messageMapper,
             StorageService storageService,
             @GrpcClient("guild-service") ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub,
-            ApplicationEventPublisher eventPublisher
+            ApplicationEventPublisher eventPublisher,
+            StorageProperties storageProperties
     ) {
         this.channelStub = channelStub;
         this.eventPublisher = eventPublisher;
+        this.storageProperties = storageProperties;
         this.messageRepository = messageRepository;
         this.messageMapper = messageMapper;
         this.storageService = storageService;
@@ -218,4 +224,61 @@ public class MessageService {
                 .asRuntimeException();
     }
 
+    public CreateAttachmentResponse createAttachment(CreateAttachmentRequest request) {
+        // Validate every file before the gRPC call, so bad input costs no network round trip and
+        // the client never gets URLs for only some of its files.
+        request.getFiles().forEach(this::validateAttachment);
+
+        CanUserAttachFilesResponse permissionCheckResponse = this.channelStub.canUserAttachFiles(CanUserAttachFilesRequest.newBuilder()
+                .setUserId(request.getUserId().toString())
+                .setChannelId(request.getChannelId().toString())
+                .build());
+
+        int status = permissionCheckResponse.getStatus();
+        if (status == HttpStatus.BAD_REQUEST.value()) throw new BadRequestException(permissionCheckResponse.getMessage());
+        if (status == HttpStatus.FORBIDDEN.value()) throw new ForbiddenException(permissionCheckResponse.getMessage());
+        if (status != HttpStatus.OK.value()) throw Status.INTERNAL.withDescription("CanUserAttachFile returned status" + status +": "+ permissionCheckResponse.getMessage()).asRuntimeException();
+
+        CreateAttachmentResponse response = new CreateAttachmentResponse();
+        List<CreateAttachmentResponse.AttachmentUpload> attachments = response.getAttachments();
+
+        for (CreateAttachmentRequest.AttachmentMetadata file : request.getFiles()) {
+            StorageService.PresignedUpload presigned = this.storageService.createPutPresignedURL(request.getUserId(), file.fileName(), file.contentType());
+            attachments.add(new CreateAttachmentResponse.AttachmentUpload(file.id(), presigned.key(), presigned.url(), presigned.expiresAt()));
+        }
+
+        return response;
+    }
+
+    /**
+     * Rejects files the client declares as too large or of a type we don't accept. These are the
+     * client's own claims, so this only stops honest mistakes early: the content type is also signed
+     * into the upload URL (S3 rejects a different Content-Type header), and the real size has to be
+     * checked with HeadObject when the key is attached to a message.
+     */
+    private void validateAttachment(CreateAttachmentRequest.AttachmentMetadata file) {
+        DataSize maxFileSize = this.storageProperties.maxFileSize();
+        if (file.size() > maxFileSize.toBytes()) {
+            throw new BadRequestException(file.fileName() + " is larger than the " + maxFileSize.toMegabytes() + "MB limit");
+        }
+
+        MediaType contentType;
+        try {
+            contentType = MediaType.parseMediaType(file.contentType());
+        } catch (InvalidMediaTypeException e) {
+            throw new BadRequestException(file.fileName() + " has an invalid content type");
+        }
+
+        // A wildcard like image/* is fine in the allowlist but meaningless as a file's own type,
+        // and would be stored as the object's Content-Type.
+        if (contentType.isWildcardType() || contentType.isWildcardSubtype()) {
+            throw new BadRequestException(file.fileName() + " must have a specific content type");
+        }
+
+        boolean allowed = this.storageProperties.allowedContentTypes().stream()
+                .anyMatch(allowedType -> allowedType.includes(contentType));
+        if (!allowed) {
+            throw new BadRequestException(file.fileName() + " has a content type that isn't allowed");
+        }
+    }
 }

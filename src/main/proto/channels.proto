@@ -7,6 +7,7 @@ option java_outer_classname = "ChannelProto";
 
 import "permissions.proto";
 
+
 service ChannelsService {
   rpc AcknowledgeMessage (AcknowledgeMessageRequest) returns (AcknowledgeMessageResponse);
   rpc GetDMChannels (GetDMChannelsRequest) returns (GetDMChannelsResponse);
@@ -15,6 +16,7 @@ service ChannelsService {
   rpc CanUserSendMessage (CanUserSendMessageRequest) returns (CanUserSendMessageResponse);
   rpc CanUserGetChannelMessages (CanUserGetChannelMessagesRequest) returns (CanUserGetChannelMessagesResponse);
   rpc CanUserDeleteMessage (CanUserDeleteMessageRequest) returns (CanUserDeleteMessageResponse);
+  rpc CanUserAttachFiles (CanUserAttachFilesRequest) returns (CanUserAttachFilesResponse);
   rpc CheckPermission (CheckPermissionRequest) returns (CheckPermissionResponse);
 }
 
@@ -80,7 +82,6 @@ message CanUserDeleteMessageResponse {
   bool allowed = 1;
 }
 
-
 message CheckPermissionRequest {
   string userId = 1;
   string channelId = 2;
@@ -98,6 +99,17 @@ message CanUserGetChannelMessagesRequest {
 }
 
 message CanUserGetChannelMessagesResponse {
+  int32 status = 1;
+  bool data = 2;
+  string message = 3;
+}
+
+message CanUserAttachFilesRequest {
+  string userId = 1;
+  string channelId = 2;
+}
+
+message CanUserAttachFilesResponse {
   int32 status = 1;
   bool data = 2;
   string message = 3;
@@ -180,6 +192,7 @@ message GuildMember {
   repeated string roles = 2;
   UserProfile profile = 3;
 }
+
 
 message PermissionOverwrite {
   string allow = 2;
