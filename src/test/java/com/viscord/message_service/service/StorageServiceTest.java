@@ -2,13 +2,6 @@ package com.viscord.message_service.service;
 
 import com.viscord.message_service.config.StorageProperties;
 import io.awspring.cloud.s3.S3Template;
-import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
-import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
-import software.amazon.awssdk.services.s3.model.S3Exception;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -20,7 +13,11 @@ import org.mockito.Mockito;
 import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.util.unit.DataSize;
+import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
 
+import java.net.URI;
 import java.net.URL;
 import java.time.Clock;
 import java.time.Duration;
@@ -49,7 +46,7 @@ public class StorageServiceTest {
     void setUp() throws Exception {
         s3Client = Mockito.mock(S3Client.class);
         s3Template = Mockito.mock(S3Template.class);
-        StorageProperties properties = new StorageProperties(TTL, null, DataSize.ofMegabytes(25), List.of(MediaType.ALL));
+        StorageProperties properties = new StorageProperties(TTL, URI.create("https://cdn.test"), null, DataSize.ofMegabytes(25), List.of(MediaType.ALL));
         storageService = new StorageService(s3Client, s3Template, properties, Clock.fixed(NOW, ZoneOffset.UTC));
         // bucketName is an @Value field, not a constructor argument.
         ReflectionTestUtils.setField(storageService, "bucketName", BUCKET);

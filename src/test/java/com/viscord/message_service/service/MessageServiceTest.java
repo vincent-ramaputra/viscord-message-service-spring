@@ -19,6 +19,7 @@ import com.viscord.message_service.grpc.ChannelsServiceGrpc;
 import com.viscord.message_service.grpc.CanUserGetChannelMessagesResponse;
 import com.viscord.message_service.mapper.AttachmentMapper;
 import com.viscord.message_service.mapper.MessageMapper;
+import com.viscord.message_service.mapper.StorageUrlMapper;
 import com.viscord.message_service.messaging.MessageCreatedEvent;
 import com.viscord.message_service.model.message.Attachment;
 import com.viscord.message_service.model.message.Message;
@@ -47,6 +48,7 @@ import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.unit.DataSize;
 
+import java.net.URI;
 import java.net.URL;
 import java.time.Duration;
 import java.time.Instant;
@@ -84,6 +86,8 @@ public class MessageServiceTest {
     @BeforeEach
     void setUp() {
         ReflectionTestUtils.setField(messageMapper, "attachmentMapper", attachmentMapper);
+        ReflectionTestUtils.setField(attachmentMapper, "storageUrlMapper", new StorageUrlMapper(
+                new StorageProperties(Duration.ofMinutes(5), URI.create(CDN_ENDPOINT), null, MAX_FILE_SIZE, List.of(MediaType.ALL))));
         // No real transaction manager in a unit test: run the callback directly. Lenient because
         // most tests never reach the transaction.
         Mockito.lenient().when(transactionTemplate.execute(Mockito.any()))
@@ -534,6 +538,7 @@ public class MessageServiceTest {
     }
 
     private static final DataSize MAX_FILE_SIZE = DataSize.ofMegabytes(25);
+    private static final String CDN_ENDPOINT = "https://cdn.test";
 
     /**
      * The @InjectMocks instance gets null StorageProperties, so attachment tests build their own
@@ -541,7 +546,7 @@ public class MessageServiceTest {
      * a rejected type pass a narrower list.
      */
     private MessageService attachmentService(MediaType... allowedContentTypes) {
-        StorageProperties properties = new StorageProperties(Duration.ofMinutes(5), null, MAX_FILE_SIZE, List.of(allowedContentTypes));
+        StorageProperties properties = new StorageProperties(Duration.ofMinutes(5), URI.create(CDN_ENDPOINT), null, MAX_FILE_SIZE, List.of(allowedContentTypes));
         return new MessageService(messageRepository, messageMapper, storageService, channelStub, eventPublisher, properties, transactionTemplate);
     }
 
@@ -753,7 +758,7 @@ public class MessageServiceTest {
         MessageResponse result = attachmentService(MediaType.ALL).createMessage(req);
 
         Assertions.assertEquals(1, result.getAttachments().size());
-        Assertions.assertEquals(permanent, result.getAttachments().get(0).getUrl());
+        Assertions.assertEquals(CDN_ENDPOINT + "/" + permanent, result.getAttachments().get(0).getUrl());
         Assertions.assertEquals("cat.png", result.getAttachments().get(0).getFilename());
         Assertions.assertEquals(2048, result.getAttachments().get(0).getSize());
         Assertions.assertEquals("image/png", result.getAttachments().get(0).getType());

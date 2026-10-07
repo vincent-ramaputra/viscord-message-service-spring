@@ -13,13 +13,20 @@ import java.util.List;
 
 @Validated
 @ConfigurationProperties(prefix = "viscord.storage")
-public record StorageProperties (
-    @NotNull Duration uploadUrlTtl,
+public record StorageProperties(
+        @NotNull Duration uploadUrlTtl,
 
-    URI publicEndpoint,
+        @NotNull URI cdnEndpoint,
+        URI publicEndpoint,
 
-    @NotNull DataSize maxFileSize,
+        @NotNull DataSize maxFileSize,
 
-    // May contain wildcards such as image/*; use */* to allow any type.
-    @NotEmpty List<MediaType> allowedContentTypes
-) {}
+        // May contain wildcards such as image/*; use */* to allow any type.
+        @NotEmpty List<MediaType> allowedContentTypes
+) {
+    public StorageProperties {
+        if (cdnEndpoint != null && (cdnEndpoint.getScheme() == null || cdnEndpoint.getHost() == null)) {
+            throw new IllegalArgumentException("viscord.storage.cdn-endpoint must be an absolute http(s) URL, got " + cdnEndpoint);
+        }
+    }
+}
