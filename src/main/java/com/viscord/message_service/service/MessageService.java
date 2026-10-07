@@ -2,7 +2,6 @@ package com.viscord.message_service.service;
 
 import com.viscord.message_service.config.StorageProperties;
 import com.viscord.message_service.dto.*;
-import com.viscord.message_service.enums.StoragePath;
 import com.viscord.message_service.exception.BadRequestException;
 import com.viscord.message_service.exception.ForbiddenException;
 import com.viscord.message_service.exception.NotFoundException;
@@ -22,7 +21,6 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.unit.DataSize;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -145,50 +143,6 @@ public class MessageService {
         }
 
         attachmentKeys.forEach(attachmentKey -> this.storageService.deleteFileQuietly(attachmentKey.key()));
-
-        MessageResponse result = messageMapper.toDto(message);
-        eventPublisher.publishEvent(new MessageCreatedEvent(result));
-        return result;
-    }
-
-    /**
-     * Multipart flow where the files pass through this service. Kept only until web-client
-     * switches to presigned uploads (#29); remove it and its controller handler then.
-     */
-    @Deprecated
-    public MessageResponse createMessageWithUploads(CreateMessageRequest request, List<MultipartFile> files) {
-        List<MultipartFile> uploads = files == null ? List.of() : files;
-        boolean isContentEmpty = request.getContent() == null || request.getContent().isBlank();
-        boolean isAttachmentEmpty = uploads.stream().allMatch(file -> file.getSize() == 0);
-
-        if (isContentEmpty && isAttachmentEmpty) {
-            throw new BadRequestException("Message content cannot be empty");
-        }
-
-        checkCanSendMessage(request.getSenderId(), request.getChannelId());
-        if (!uploads.isEmpty()) {
-            checkCanAttachFiles(request.getSenderId(), request.getChannelId());
-        }
-
-        Message message = messageMapper.toEntity(request);
-        message = messageRepository.save(message);
-
-        for (MultipartFile file : uploads) {
-            Attachment att = new Attachment();
-            att.setFilename(file.getOriginalFilename());
-            att.setSize(file.getSize());
-            att.setType(file.getContentType());
-            att.setMessage(message);
-            att.setMessageId(message.getId());
-
-            String key = storageService.uploadFile(file, StoragePath.ATTACHMENT, message.getId().toString());
-            att.setUrl(key);
-
-            message.addAttachment(att);
-        }
-
-        addMentions(message, request.getMentions());
-        message = messageRepository.save(message);
 
         MessageResponse result = messageMapper.toDto(message);
         eventPublisher.publishEvent(new MessageCreatedEvent(result));

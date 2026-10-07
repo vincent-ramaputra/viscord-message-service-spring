@@ -42,12 +42,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
-import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.unit.DataSize;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.net.URL;
 import java.time.Duration;
@@ -239,51 +237,6 @@ public class MessageServiceTest {
             messageService.createMessage(req);
         });
 
-        Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
-    }
-
-    @Test
-    @DisplayName("Happy path (deprecated multipart flow): given empty content but with an uploaded file, should save message")
-    void createMessageWithUploads_EmptyContentWithFile_ReturnsMessageResponse() {
-        CreateMessageRequest req = createRequest("");
-        List<MultipartFile> files = List.of(new MockMultipartFile("file", "test.txt", "text/plain", "content".getBytes()));
-
-        Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
-        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(HttpStatus.OK.value(), ""));
-        Mockito.when(messageRepository.save(ArgumentMatchers.any(Message.class))).thenAnswer(invocation -> {
-            Message message = invocation.getArgument(0, Message.class);
-            message.setId(UUID.randomUUID());
-
-            return message;
-        });
-        Mockito.when(storageService.uploadFile(Mockito.any(), Mockito.any(), Mockito.any())).thenAnswer(invocation -> {
-            MultipartFile file = invocation.getArgument(0, MultipartFile.class);
-
-            return String.format("example/key/%s", file.getOriginalFilename());
-        });
-
-        MessageResponse result = messageService.createMessageWithUploads(req, files);
-
-        Mockito.verify(messageMapper).toEntity(req);
-        Assertions.assertNotNull(result);
-        Assertions.assertEquals(req.getSenderId(), result.getSenderId());
-        Assertions.assertEquals(req.getContent(), result.getContent());
-        Assertions.assertEquals(files.size(), result.getAttachments().size());
-    }
-
-    @Test
-    @DisplayName("Unhappy path (deprecated multipart flow): when the user can't attach files, should throw forbidden before uploading")
-    void createMessageWithUploads_PermissionDenied_ThrowsForbidden() {
-        CreateMessageRequest req = createRequest("with a file");
-        List<MultipartFile> files = List.of(new MockMultipartFile("file", "test.txt", "text/plain", "content".getBytes()));
-
-        Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
-        Mockito.when(channelStub.canUserAttachFiles(Mockito.any()))
-                .thenReturn(createCanUserAttachFilesResponse(HttpStatus.FORBIDDEN.value(), "User is not allowed to attach files"));
-
-        Assertions.assertThrows(ForbiddenException.class, () -> messageService.createMessageWithUploads(req, files));
-
-        Mockito.verify(storageService, Mockito.never()).uploadFile(Mockito.any(), Mockito.any(), Mockito.any());
         Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
     }
 
