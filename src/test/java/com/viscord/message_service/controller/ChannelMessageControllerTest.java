@@ -1,9 +1,15 @@
 package com.viscord.message_service.controller;
 
+import com.viscord.message_service.dto.CreateMessageRequest;
 import com.viscord.message_service.dto.MessageResponse;
 import com.viscord.message_service.service.MessageService;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -14,9 +20,13 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -42,11 +52,58 @@ class ChannelMessageControllerTest {
     @Test
     @DisplayName("Happy path: JSON data part is bound and the message is created")
     void createMessage_JsonDataPart_ReturnsCreated() throws Exception {
-        Mockito.when(messageService.createMessage(Mockito.any())).thenReturn(new MessageResponse());
+        Mockito.when(messageService.createMessageWithUploads(Mockito.any(), Mockito.any())).thenReturn(new MessageResponse());
         MockMultipartFile data = new MockMultipartFile("data", "", MediaType.APPLICATION_JSON_VALUE, DATA_JSON.getBytes(StandardCharsets.UTF_8));
 
         mockMvc.perform(multipart(messagesPath()).file(data).header("X-User-Id", UUID.randomUUID()))
                 .andExpect(status().isCreated());
+
+        Mockito.verify(messageService, Mockito.never()).createMessage(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Happy path: JSON body with attachment keys goes to the presigned-upload flow")
+    void createMessage_JsonBody_ReturnsCreated() throws Exception {
+        UUID userId = UUID.randomUUID();
+        Mockito.when(messageService.createMessage(Mockito.any())).thenReturn(new MessageResponse());
+
+        mockMvc.perform(post(messagesPath())
+                        .header("X-User-Id", userId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"hi\",\"attachments\":[{\"key\":\"pending/" + userId + "/a.png\",\"fileName\":\"a.png\"}]}"))
+                .andExpect(status().isCreated());
+
+        ArgumentCaptor<CreateMessageRequest> captor = ArgumentCaptor.forClass(CreateMessageRequest.class);
+        Mockito.verify(messageService).createMessage(captor.capture());
+        Assertions.assertEquals(userId, captor.getValue().getSenderId());
+        Assertions.assertEquals(1, captor.getValue().getAttachments().size());
+        Mockito.verify(messageService, Mockito.never()).createMessageWithUploads(Mockito.any(), Mockito.any());
+    }
+
+    static Stream<Arguments> invalidJsonMessages() {
+        String elevenAttachments = IntStream.range(0, 11)
+                .mapToObj(i -> "{\"key\":\"pending/u/" + i + ".png\",\"fileName\":\"" + i + ".png\"}")
+                .collect(Collectors.joining(","));
+
+        return Stream.of(
+                Arguments.of("blank key", "{\"attachments\":[{\"key\":\" \",\"fileName\":\"a.png\"}]}"),
+                Arguments.of("missing file name", "{\"attachments\":[{\"key\":\"pending/u/a.png\"}]}"),
+                Arguments.of("more than 10 attachments", "{\"attachments\":[" + elevenAttachments + "]}")
+        );
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidJsonMessages")
+    @DisplayName("Unhappy path: JSON message failing bean validation returns 400 without calling the service")
+    void createMessage_InvalidJson_ReturnsBadRequest(String description, String body) throws Exception {
+        mockMvc.perform(post(messagesPath())
+                        .header("X-User-Id", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").isNotEmpty());
+
+        Mockito.verifyNoInteractions(messageService);
     }
 
     @Test
