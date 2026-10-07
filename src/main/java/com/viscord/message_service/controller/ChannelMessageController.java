@@ -12,7 +12,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.UUID;
@@ -48,24 +47,6 @@ public class ChannelMessageController {
         data.setChannelId(channelId);
 
         return ResponseEntity.status(HttpStatus.CREATED).body(messageService.createMessage(data));
-    }
-
-    /**
-     * Same path, chosen by Content-Type: the multipart flow the current web-client still uses.
-     * Remove once web-client sends JSON with presigned-upload keys (#29).
-     */
-    @Deprecated
-    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<MessageResponse> createMessageWithUploads(
-            @RequestHeader("X-User-Id") UUID userId,
-            @PathVariable UUID channelId,
-            @RequestPart(value = "attachments", required = false) List<MultipartFile> attachments,
-            @Valid @RequestPart("data") CreateMessageRequest data
-    ) {
-        data.setSenderId(userId);
-        data.setChannelId(channelId);
-
-        return ResponseEntity.status(HttpStatus.CREATED).body(messageService.createMessageWithUploads(data, attachments));
     }
 
     @DeleteMapping("/{messageId}")

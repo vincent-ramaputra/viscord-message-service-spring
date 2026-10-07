@@ -50,15 +50,15 @@ class ChannelMessageControllerTest {
     }
 
     @Test
-    @DisplayName("Happy path: JSON data part is bound and the message is created")
-    void createMessage_JsonDataPart_ReturnsCreated() throws Exception {
-        Mockito.when(messageService.createMessageWithUploads(Mockito.any(), Mockito.any())).thenReturn(new MessageResponse());
+    @DisplayName("Unhappy path: the removed multipart flow returns 415 without calling the service")
+    void createMessage_Multipart_ReturnsUnsupportedMediaType() throws Exception {
         MockMultipartFile data = new MockMultipartFile("data", "", MediaType.APPLICATION_JSON_VALUE, DATA_JSON.getBytes(StandardCharsets.UTF_8));
 
         mockMvc.perform(multipart(messagesPath()).file(data).header("X-User-Id", UUID.randomUUID()))
-                .andExpect(status().isCreated());
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.message").isNotEmpty());
 
-        Mockito.verify(messageService, Mockito.never()).createMessage(Mockito.any());
+        Mockito.verifyNoInteractions(messageService);
     }
 
     @Test
@@ -77,7 +77,6 @@ class ChannelMessageControllerTest {
         Mockito.verify(messageService).createMessage(captor.capture());
         Assertions.assertEquals(userId, captor.getValue().getSenderId());
         Assertions.assertEquals(1, captor.getValue().getAttachments().size());
-        Mockito.verify(messageService, Mockito.never()).createMessageWithUploads(Mockito.any(), Mockito.any());
     }
 
     static Stream<Arguments> invalidJsonMessages() {
@@ -107,25 +106,16 @@ class ChannelMessageControllerTest {
     }
 
     @Test
-    @DisplayName("Unhappy path: data part without a JSON content type returns 415, not 500")
-    void createMessage_UntypedDataPart_ReturnsUnsupportedMediaType() throws Exception {
-        MockMultipartFile data = new MockMultipartFile("data", "", MediaType.APPLICATION_OCTET_STREAM_VALUE, DATA_JSON.getBytes(StandardCharsets.UTF_8));
-
-        mockMvc.perform(multipart(messagesPath()).file(data).header("X-User-Id", UUID.randomUUID()))
-                .andExpect(status().isUnsupportedMediaType())
+    @DisplayName("Unhappy path: malformed JSON body returns 400")
+    void createMessage_MalformedJson_ReturnsBadRequest() throws Exception {
+        mockMvc.perform(post(messagesPath())
+                        .header("X-User-Id", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{not json"))
+                .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").isNotEmpty());
 
         Mockito.verifyNoInteractions(messageService);
-    }
-
-    @Test
-    @DisplayName("Unhappy path: malformed JSON in the data part returns 400")
-    void createMessage_MalformedJson_ReturnsBadRequest() throws Exception {
-        MockMultipartFile data = new MockMultipartFile("data", "", MediaType.APPLICATION_JSON_VALUE, "{not json".getBytes(StandardCharsets.UTF_8));
-
-        mockMvc.perform(multipart(messagesPath()).file(data).header("X-User-Id", UUID.randomUUID()))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message").isNotEmpty());
     }
 
     @Test

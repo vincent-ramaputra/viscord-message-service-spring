@@ -2,14 +2,12 @@ package com.viscord.message_service.service;
 
 import com.viscord.message_service.config.StorageProperties;
 import com.viscord.message_service.enums.StoragePath;
-import io.awspring.cloud.s3.ObjectMetadata;
 import io.awspring.cloud.s3.S3Template;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.springframework.web.multipart.MultipartFile;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
@@ -17,7 +15,6 @@ import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
-import java.io.IOException;
 import java.net.URL;
 import java.time.Clock;
 import java.time.Instant;
@@ -42,24 +39,6 @@ public class StorageService {
     private final S3Template s3Template;
     private final StorageProperties storageProperties;
     private final Clock clock;
-
-    public String uploadFile(MultipartFile file, StoragePath type, String entityId) {
-        String extension = StringUtils.getFilenameExtension(file.getOriginalFilename());
-        String key = String.format("%s/%s/%s", type.getPath(), entityId, UUID.randomUUID() + "." + extension);
-
-        try {
-            ObjectMetadata metadata = ObjectMetadata.builder()
-                    .contentType(file.getContentType())
-                    .build();
-
-            this.s3Template.upload(this.bucketName, key, file.getInputStream(), metadata);
-            return key;
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to read file input stream", e);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to upload to S3", e);
-        }
-    }
 
     public void deleteFile(String key) {
         try {
