@@ -44,6 +44,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -75,12 +77,21 @@ public class MessageServiceTest {
     @Mock
     private ApplicationEventPublisher eventPublisher;
 
+    @Mock
+    private TransactionTemplate transactionTemplate;
+
     @InjectMocks
     private MessageService messageService;
 
     @BeforeEach
     void setUp() {
         ReflectionTestUtils.setField(messageMapper, "attachmentMapper", attachmentMapper);
+        // No real transaction manager in a unit test: run the callback directly. Lenient because
+        // most tests never reach the transaction.
+        Mockito.lenient().when(transactionTemplate.execute(Mockito.any()))
+                .thenAnswer(invocation -> invocation.<TransactionCallback<?>>getArgument(0).doInTransaction(null));
+        // The ownership rule is a pure string check, so tests use the real one.
+        Mockito.lenient().when(storageService.isPendingKeyOwnedBy(Mockito.any(), Mockito.any())).thenCallRealMethod();
     }
 
     private CreateMessageRequest createRequest(String content) {
@@ -232,12 +243,13 @@ public class MessageServiceTest {
     }
 
     @Test
-    @DisplayName("Happy path: given empty content but with attachment, should save message")
-    void createMessage_EmptyContentWithAttachment_ReturnsMessageResponse() {
+    @DisplayName("Happy path (deprecated multipart flow): given empty content but with an uploaded file, should save message")
+    void createMessageWithUploads_EmptyContentWithFile_ReturnsMessageResponse() {
         CreateMessageRequest req = createRequest("");
-        req.setAttachments(List.of(new MockMultipartFile("file", "test.txt", "text/plain", "content".getBytes())));
+        List<MultipartFile> files = List.of(new MockMultipartFile("file", "test.txt", "text/plain", "content".getBytes()));
 
         Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(HttpStatus.OK.value(), ""));
         Mockito.when(messageRepository.save(ArgumentMatchers.any(Message.class))).thenAnswer(invocation -> {
             Message message = invocation.getArgument(0, Message.class);
             message.setId(UUID.randomUUID());
@@ -250,13 +262,29 @@ public class MessageServiceTest {
             return String.format("example/key/%s", file.getOriginalFilename());
         });
 
-        MessageResponse result = messageService.createMessage(req);
+        MessageResponse result = messageService.createMessageWithUploads(req, files);
 
         Mockito.verify(messageMapper).toEntity(req);
         Assertions.assertNotNull(result);
         Assertions.assertEquals(req.getSenderId(), result.getSenderId());
         Assertions.assertEquals(req.getContent(), result.getContent());
-        Assertions.assertEquals(req.getAttachments().size(), result.getAttachments().size());
+        Assertions.assertEquals(files.size(), result.getAttachments().size());
+    }
+
+    @Test
+    @DisplayName("Unhappy path (deprecated multipart flow): when the user can't attach files, should throw forbidden before uploading")
+    void createMessageWithUploads_PermissionDenied_ThrowsForbidden() {
+        CreateMessageRequest req = createRequest("with a file");
+        List<MultipartFile> files = List.of(new MockMultipartFile("file", "test.txt", "text/plain", "content".getBytes()));
+
+        Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any()))
+                .thenReturn(createCanUserAttachFilesResponse(HttpStatus.FORBIDDEN.value(), "User is not allowed to attach files"));
+
+        Assertions.assertThrows(ForbiddenException.class, () -> messageService.createMessageWithUploads(req, files));
+
+        Mockito.verify(storageService, Mockito.never()).uploadFile(Mockito.any(), Mockito.any(), Mockito.any());
+        Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
     }
 
     @Test
@@ -561,7 +589,7 @@ public class MessageServiceTest {
      */
     private MessageService attachmentService(MediaType... allowedContentTypes) {
         StorageProperties properties = new StorageProperties(Duration.ofMinutes(5), null, MAX_FILE_SIZE, List.of(allowedContentTypes));
-        return new MessageService(messageRepository, messageMapper, storageService, channelStub, eventPublisher, properties);
+        return new MessageService(messageRepository, messageMapper, storageService, channelStub, eventPublisher, properties, transactionTemplate);
     }
 
     private CreateAttachmentRequest createAttachmentRequest(CreateAttachmentRequest.AttachmentMetadata... files) {
@@ -728,4 +756,217 @@ public class MessageServiceTest {
         Mockito.verifyNoInteractions(storageService);
     }
 
+    // --- createMessage with presigned-upload keys ---
+
+    private CreateMessageRequest createRequestWithKeys(String content, String... fileNames) {
+        CreateMessageRequest req = createRequest(content);
+        List<CreateMessageRequest.AttachmentKey> keys = new ArrayList<>();
+        for (String fileName : fileNames) {
+            keys.add(new CreateMessageRequest.AttachmentKey(pendingKey(req.getSenderId()), fileName));
+        }
+        req.setAttachments(keys);
+        return req;
+    }
+
+    private static String pendingKey(UUID ownerId) {
+        return "pending/" + ownerId + "/" + UUID.randomUUID() + ".png";
+    }
+
+    private void allowSendAndAttach() {
+        Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any())).thenReturn(createCanUserAttachFilesResponse(HttpStatus.OK.value(), ""));
+    }
+
+    private void stubSaveAssignsId() {
+        Mockito.when(messageRepository.save(ArgumentMatchers.any(Message.class))).thenAnswer(invocation -> {
+            Message message = invocation.getArgument(0, Message.class);
+            if (message.getId() == null) message.setId(UUID.randomUUID());
+            return message;
+        });
+    }
+
+    @Test
+    @DisplayName("Happy path: given an uploaded key, should store the copied key with the size and type S3 reports, then delete the pending original")
+    void createMessage_UploadedKey_StoresCopyAndDeletesOriginal() {
+        CreateMessageRequest req = createRequestWithKeys("look", "cat.png");
+        String pending = req.getAttachments().get(0).key();
+        String permanent = "messages/attachments/" + req.getChannelId() + "/copied.png";
+
+        allowSendAndAttach();
+        stubSaveAssignsId();
+        Mockito.when(storageService.findObject(pending)).thenReturn(Optional.of(new StorageService.StoredObject(2048, "image/png")));
+        Mockito.when(storageService.copyToAttachments(pending, req.getChannelId())).thenReturn(permanent);
+
+        MessageResponse result = attachmentService(MediaType.ALL).createMessage(req);
+
+        Assertions.assertEquals(1, result.getAttachments().size());
+        Assertions.assertEquals(permanent, result.getAttachments().get(0).getUrl());
+        Assertions.assertEquals("cat.png", result.getAttachments().get(0).getFilename());
+        Assertions.assertEquals(2048, result.getAttachments().get(0).getSize());
+        Assertions.assertEquals("image/png", result.getAttachments().get(0).getType());
+
+        Mockito.verify(storageService).deleteFileQuietly(pending);
+        Mockito.verify(storageService, Mockito.never()).deleteFileQuietly(permanent);
+        Mockito.verify(eventPublisher).publishEvent(new MessageCreatedEvent(result));
+    }
+
+    @Test
+    @DisplayName("Happy path: given no attachments, should not check the attach-files permission")
+    void createMessage_NoAttachments_SkipsAttachPermission() {
+        CreateMessageRequest req = createRequest("just text");
+
+        Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
+        stubSaveAssignsId();
+
+        attachmentService(MediaType.ALL).createMessage(req);
+
+        Mockito.verify(channelStub, Mockito.never()).canUserAttachFiles(Mockito.any());
+        Mockito.verify(storageService, Mockito.never()).findObject(Mockito.any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"someone-else", "nested", "bare-prefix", "other-folder"})
+    @DisplayName("Unhappy path: given a key that isn't the sender's pending upload, should throw bad request before any remote call")
+    void createMessage_KeyNotOwned_ThrowsBadRequest(String variant) {
+        CreateMessageRequest req = createRequest("look");
+        UUID sender = req.getSenderId();
+        String key = switch (variant) {
+            case "someone-else" -> pendingKey(UUID.randomUUID());
+            case "nested" -> "pending/" + sender + "/sub/" + UUID.randomUUID() + ".png";
+            case "bare-prefix" -> "pending/" + sender + "/";
+            default -> "messages/attachments/" + UUID.randomUUID() + "/x.png";
+        };
+        req.setAttachments(List.of(new CreateMessageRequest.AttachmentKey(key, "cat.png")));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verifyNoInteractions(channelStub);
+        Mockito.verify(storageService, Mockito.never()).findObject(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given the same key twice, should throw bad request before any remote call")
+    void createMessage_DuplicateKey_ThrowsBadRequest() {
+        CreateMessageRequest req = createRequest("look");
+        String key = pendingKey(req.getSenderId());
+        req.setAttachments(List.of(
+                new CreateMessageRequest.AttachmentKey(key, "cat.png"),
+                new CreateMessageRequest.AttachmentKey(key, "cat-again.png")));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verifyNoInteractions(channelStub);
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when the user can't attach files, should throw forbidden without touching S3")
+    void createMessage_AttachPermissionDenied_ThrowsForbidden() {
+        CreateMessageRequest req = createRequestWithKeys("look", "cat.png");
+
+        Mockito.when(channelStub.canUserSendMessage(Mockito.any())).thenReturn(createCanUserSendMessageResponse(true, HttpStatus.OK.value(), ""));
+        Mockito.when(channelStub.canUserAttachFiles(Mockito.any()))
+                .thenReturn(createCanUserAttachFilesResponse(HttpStatus.FORBIDDEN.value(), "User is not allowed to attach files"));
+
+        Assertions.assertThrows(ForbiddenException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verify(storageService, Mockito.never()).findObject(Mockito.any());
+        Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given a key with nothing uploaded, should throw bad request without copying")
+    void createMessage_ObjectMissing_ThrowsBadRequest() {
+        CreateMessageRequest req = createRequestWithKeys("look", "cat.png");
+
+        allowSendAndAttach();
+        Mockito.when(storageService.findObject(Mockito.any())).thenReturn(Optional.empty());
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verify(storageService, Mockito.never()).copyToAttachments(Mockito.any(), Mockito.any());
+        Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given an uploaded object over the size limit, should throw bad request without copying")
+    void createMessage_StoredObjectTooLarge_ThrowsBadRequest() {
+        CreateMessageRequest req = createRequestWithKeys("look", "cat.png");
+
+        allowSendAndAttach();
+        Mockito.when(storageService.findObject(Mockito.any()))
+                .thenReturn(Optional.of(new StorageService.StoredObject(MAX_FILE_SIZE.toBytes() + 1, "image/png")));
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verify(storageService, Mockito.never()).copyToAttachments(Mockito.any(), Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given an uploaded object whose real type isn't allowed, should throw bad request without copying")
+    void createMessage_StoredObjectTypeNotAllowed_ThrowsBadRequest() {
+        CreateMessageRequest req = createRequestWithKeys("look", "cat.png");
+
+        allowSendAndAttach();
+        Mockito.when(storageService.findObject(Mockito.any()))
+                .thenReturn(Optional.of(new StorageService.StoredObject(1024, "application/x-msdownload")));
+
+        Assertions.assertThrows(BadRequestException.class,
+                () -> attachmentService(MediaType.parseMediaType("image/*")).createMessage(req));
+
+        Mockito.verify(storageService, Mockito.never()).copyToAttachments(Mockito.any(), Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: given one bad file among good ones, should copy none of them")
+    void createMessage_OneBadObject_CopiesNothing() {
+        CreateMessageRequest req = createRequestWithKeys("look", "good.png", "missing.png");
+
+        allowSendAndAttach();
+        Mockito.when(storageService.findObject(req.getAttachments().get(0).key()))
+                .thenReturn(Optional.of(new StorageService.StoredObject(1024, "image/png")));
+        Mockito.when(storageService.findObject(req.getAttachments().get(1).key())).thenReturn(Optional.empty());
+
+        Assertions.assertThrows(BadRequestException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verify(storageService, Mockito.never()).copyToAttachments(Mockito.any(), Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when a later copy fails, should delete the copies already made and keep the originals")
+    void createMessage_SecondCopyFails_DeletesFirstCopy() {
+        CreateMessageRequest req = createRequestWithKeys("look", "a.png", "b.png");
+        String firstPending = req.getAttachments().get(0).key();
+        String secondPending = req.getAttachments().get(1).key();
+
+        allowSendAndAttach();
+        Mockito.when(storageService.findObject(Mockito.any())).thenReturn(Optional.of(new StorageService.StoredObject(1024, "image/png")));
+        Mockito.when(storageService.copyToAttachments(firstPending, req.getChannelId())).thenReturn("messages/attachments/copy-a.png");
+        Mockito.when(storageService.copyToAttachments(secondPending, req.getChannelId())).thenThrow(new RuntimeException("S3 down"));
+
+        Assertions.assertThrows(RuntimeException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verify(storageService).deleteFileQuietly("messages/attachments/copy-a.png");
+        Mockito.verify(storageService, Mockito.never()).deleteFileQuietly(firstPending);
+        Mockito.verify(storageService, Mockito.never()).deleteFileQuietly(secondPending);
+        Mockito.verify(messageRepository, Mockito.never()).save(Mockito.any());
+    }
+
+    @Test
+    @DisplayName("Unhappy path: when saving the message fails, should delete the copies, keep the originals and publish nothing")
+    void createMessage_SaveFails_DeletesCopiesKeepsOriginals() {
+        CreateMessageRequest req = createRequestWithKeys("look", "cat.png");
+        String pending = req.getAttachments().get(0).key();
+        String permanent = "messages/attachments/" + req.getChannelId() + "/copied.png";
+
+        allowSendAndAttach();
+        Mockito.when(storageService.findObject(pending)).thenReturn(Optional.of(new StorageService.StoredObject(1024, "image/png")));
+        Mockito.when(storageService.copyToAttachments(pending, req.getChannelId())).thenReturn(permanent);
+        Mockito.when(messageRepository.save(Mockito.any())).thenThrow(new RuntimeException("DB down"));
+
+        Assertions.assertThrows(RuntimeException.class, () -> attachmentService(MediaType.ALL).createMessage(req));
+
+        Mockito.verify(storageService).deleteFileQuietly(permanent);
+        Mockito.verify(storageService, Mockito.never()).deleteFileQuietly(pending);
+        Mockito.verify(eventPublisher, Mockito.never()).publishEvent(Mockito.any(Object.class));
+    }
 }

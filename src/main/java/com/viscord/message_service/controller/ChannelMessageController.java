@@ -34,8 +34,29 @@ public class ChannelMessageController {
         return ResponseEntity.ok(messageService.getChannelMessages(userId, channelId));
     }
 
-    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    /**
+     * Attachments are keys from POST /channels/{channelId}/attachments; the files were uploaded
+     * straight to S3 and never pass through this service.
+     */
+    @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<MessageResponse> createMessage(
+            @RequestHeader("X-User-Id") UUID userId,
+            @PathVariable UUID channelId,
+            @Valid @RequestBody CreateMessageRequest data
+    ) {
+        data.setSenderId(userId);
+        data.setChannelId(channelId);
+
+        return ResponseEntity.status(HttpStatus.CREATED).body(messageService.createMessage(data));
+    }
+
+    /**
+     * Same path, chosen by Content-Type: the multipart flow the current web-client still uses.
+     * Remove once web-client sends JSON with presigned-upload keys (#29).
+     */
+    @Deprecated
+    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<MessageResponse> createMessageWithUploads(
             @RequestHeader("X-User-Id") UUID userId,
             @PathVariable UUID channelId,
             @RequestPart(value = "attachments", required = false) List<MultipartFile> attachments,
@@ -43,9 +64,8 @@ public class ChannelMessageController {
     ) {
         data.setSenderId(userId);
         data.setChannelId(channelId);
-        if (attachments != null) data.setAttachments(attachments);
 
-        return ResponseEntity.status(HttpStatus.CREATED).body(messageService.createMessage(data));
+        return ResponseEntity.status(HttpStatus.CREATED).body(messageService.createMessageWithUploads(data, attachments));
     }
 
     @DeleteMapping("/{messageId}")

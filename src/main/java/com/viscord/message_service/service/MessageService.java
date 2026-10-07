@@ -20,11 +20,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.InvalidMediaTypeException;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.unit.DataSize;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -35,6 +38,7 @@ public class MessageService {
     private final ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub;
     private final ApplicationEventPublisher eventPublisher;
     private final StorageProperties storageProperties;
+    private final TransactionTemplate transactionTemplate;
 
     public MessageService(
             MessageRepository messageRepository,
@@ -42,8 +46,10 @@ public class MessageService {
             StorageService storageService,
             @GrpcClient("guild-service") ChannelsServiceGrpc.ChannelsServiceBlockingStub channelStub,
             ApplicationEventPublisher eventPublisher,
-            StorageProperties storageProperties
+            StorageProperties storageProperties,
+            TransactionTemplate transactionTemplate
     ) {
+        this.transactionTemplate = transactionTemplate;
         this.channelStub = channelStub;
         this.eventPublisher = eventPublisher;
         this.storageProperties = storageProperties;
@@ -98,60 +104,197 @@ public class MessageService {
         return this.messageRepository.countByChannelIdAndCreatedAtAfter(channelId, lastRead.getCreatedAt());
     }
 
+    /**
+     * Creates a message whose attachments were already uploaded through presigned URLs.
+     * <p>
+     * S3 and Postgres can't share a transaction, so the order decides what a failure leaves behind:
+     * every object is checked and copied to its permanent key first, the rows are written in one
+     * short transaction, and only after the commit are the pending originals deleted. If the
+     * transaction fails, the copies are removed and the originals stay, so the client can retry.
+     * If a delete fails, the object is orphaned, which costs storage but never shows a user a
+     * broken attachment.
+     * <p>
+     * Accepted race: two concurrent requests with the same pending key can both pass the
+     * findObject check before either deletes the original, so both messages get a copy. The
+     * sender can only attach their own uploads, so the effect is a duplicate of their own file.
+     */
     public MessageResponse createMessage(CreateMessageRequest request) {
+        List<CreateMessageRequest.AttachmentKey> attachmentKeys = request.getAttachments() == null ? List.of() : request.getAttachments();
         boolean isContentEmpty = request.getContent() == null || request.getContent().isBlank();
-        boolean isAttachmentEmpty = request.getAttachments() == null || request.getAttachments().stream().allMatch(file -> file.getSize() == 0);
+
+        if (isContentEmpty && attachmentKeys.isEmpty()) {
+            throw new BadRequestException("Message content cannot be empty");
+        }
+
+        // Ownership and duplicate checks need no network call, so they run before the gRPC checks.
+        validateAttachmentKeys(request.getSenderId(), attachmentKeys);
+
+        checkCanSendMessage(request.getSenderId(), request.getChannelId());
+        if (!attachmentKeys.isEmpty()) {
+            checkCanAttachFiles(request.getSenderId(), request.getChannelId());
+        }
+
+        List<Attachment> attachments = copyAttachments(request.getChannelId(), attachmentKeys);
+
+        Message message;
+        try {
+            message = this.transactionTemplate.execute(status -> saveMessage(request, attachments));
+        } catch (RuntimeException e) {
+            attachments.forEach(attachment -> this.storageService.deleteFileQuietly(attachment.getUrl()));
+            throw e;
+        }
+
+        attachmentKeys.forEach(attachmentKey -> this.storageService.deleteFileQuietly(attachmentKey.key()));
+
+        MessageResponse result = messageMapper.toDto(message);
+        eventPublisher.publishEvent(new MessageCreatedEvent(result));
+        return result;
+    }
+
+    /**
+     * Multipart flow where the files pass through this service. Kept only until web-client
+     * switches to presigned uploads (#29); remove it and its controller handler then.
+     */
+    @Deprecated
+    public MessageResponse createMessageWithUploads(CreateMessageRequest request, List<MultipartFile> files) {
+        List<MultipartFile> uploads = files == null ? List.of() : files;
+        boolean isContentEmpty = request.getContent() == null || request.getContent().isBlank();
+        boolean isAttachmentEmpty = uploads.stream().allMatch(file -> file.getSize() == 0);
 
         if (isContentEmpty && isAttachmentEmpty) {
             throw new BadRequestException("Message content cannot be empty");
         }
 
-        CanUserSendMessageResponse response = channelStub.canUserSendMessage(CanUserSendMessageRequest.newBuilder()
-                .setChannelId(request.getChannelId().toString())
-                .setUserId(request.getSenderId().toString())
-                .build());
-
-        final boolean canUserSendMessage = response.getData();
-        if (!canUserSendMessage) {
-            if (response.getStatus() == HttpStatus.BAD_REQUEST.value())
-                throw new BadRequestException(response.getMessage());
-            throw new ForbiddenException(response.getMessage());
+        checkCanSendMessage(request.getSenderId(), request.getChannelId());
+        if (!uploads.isEmpty()) {
+            checkCanAttachFiles(request.getSenderId(), request.getChannelId());
         }
 
         Message message = messageMapper.toEntity(request);
         message = messageRepository.save(message);
 
-        if (!request.getAttachments().isEmpty()) {
-            for (MultipartFile file : request.getAttachments()) {
-                Attachment att = new Attachment();
-                att.setFilename(file.getOriginalFilename());
-                att.setSize(file.getSize());
-                att.setType(file.getContentType());
-                att.setMessage(message);
-                att.setMessageId(message.getId());
+        for (MultipartFile file : uploads) {
+            Attachment att = new Attachment();
+            att.setFilename(file.getOriginalFilename());
+            att.setSize(file.getSize());
+            att.setType(file.getContentType());
+            att.setMessage(message);
+            att.setMessageId(message.getId());
 
-                String key = storageService.uploadFile(file, StoragePath.ATTACHMENT, message.getId().toString());
-                att.setUrl(key);
+            String key = storageService.uploadFile(file, StoragePath.ATTACHMENT, message.getId().toString());
+            att.setUrl(key);
 
-                message.addAttachment(att);
-            }
+            message.addAttachment(att);
         }
 
-        if (!request.getMentions().isEmpty()) {
-            for (UUID userId : request.getMentions()) {
-                MessageMention mention = new MessageMention();
-                mention.setMessage(message);
-                mention.setMessageId(message.getId());
-                mention.setUserId(userId);
-
-                message.addMention(mention);
-            }
-        }
+        addMentions(message, request.getMentions());
         message = messageRepository.save(message);
 
         MessageResponse result = messageMapper.toDto(message);
         eventPublisher.publishEvent(new MessageCreatedEvent(result));
         return result;
+    }
+
+    private void validateAttachmentKeys(UUID senderId, List<CreateMessageRequest.AttachmentKey> attachmentKeys) {
+        Set<String> seen = new HashSet<>();
+        for (CreateMessageRequest.AttachmentKey attachmentKey : attachmentKeys) {
+            if (!this.storageService.isPendingKeyOwnedBy(attachmentKey.key(), senderId)) {
+                throw new BadRequestException(attachmentKey.fileName() + " is not an upload of yours");
+            }
+            if (!seen.add(attachmentKey.key())) {
+                throw new BadRequestException(attachmentKey.fileName() + " is attached more than once");
+            }
+        }
+    }
+
+    /**
+     * Checks what S3 actually holds for every key before copying any of them, so one bad file
+     * doesn't leave copies of the others behind. Size and type come from S3, not from the
+     * client's earlier claims.
+     */
+    private List<Attachment> copyAttachments(UUID channelId, List<CreateMessageRequest.AttachmentKey> attachmentKeys) {
+        List<StorageService.StoredObject> storedObjects = new ArrayList<>();
+        for (CreateMessageRequest.AttachmentKey attachmentKey : attachmentKeys) {
+            StorageService.StoredObject stored = this.storageService.findObject(attachmentKey.key())
+                    .orElseThrow(() -> new BadRequestException(attachmentKey.fileName() + " was not uploaded, or its upload has expired"));
+            checkFileSize(attachmentKey.fileName(), stored.size());
+            checkContentType(attachmentKey.fileName(), stored.contentType());
+            storedObjects.add(stored);
+        }
+
+        List<Attachment> attachments = new ArrayList<>();
+        try {
+            for (int i = 0; i < attachmentKeys.size(); i++) {
+                CreateMessageRequest.AttachmentKey attachmentKey = attachmentKeys.get(i);
+                StorageService.StoredObject stored = storedObjects.get(i);
+
+                Attachment attachment = new Attachment();
+                attachment.setFilename(attachmentKey.fileName());
+                attachment.setSize(stored.size());
+                attachment.setType(stored.contentType());
+                attachment.setUrl(this.storageService.copyToAttachments(attachmentKey.key(), channelId));
+                attachments.add(attachment);
+            }
+        } catch (RuntimeException e) {
+            attachments.forEach(attachment -> this.storageService.deleteFileQuietly(attachment.getUrl()));
+            throw e;
+        }
+        return attachments;
+    }
+
+    /** Runs inside the transaction: no remote calls here, so a DB connection is held only briefly. */
+    private Message saveMessage(CreateMessageRequest request, List<Attachment> attachments) {
+        Message message = messageRepository.save(messageMapper.toEntity(request));
+
+        for (Attachment attachment : attachments) {
+            attachment.setMessage(message);
+            attachment.setMessageId(message.getId());
+            message.addAttachment(attachment);
+        }
+        addMentions(message, request.getMentions());
+
+        return messageRepository.save(message);
+    }
+
+    private void addMentions(Message message, List<UUID> mentions) {
+        if (mentions == null) return;
+
+        for (UUID userId : mentions) {
+            MessageMention mention = new MessageMention();
+            mention.setMessage(message);
+            mention.setMessageId(message.getId());
+            mention.setUserId(userId);
+
+            message.addMention(mention);
+        }
+    }
+
+    private void checkCanSendMessage(UUID userId, UUID channelId) {
+        CanUserSendMessageResponse response = channelStub.canUserSendMessage(CanUserSendMessageRequest.newBuilder()
+                .setChannelId(channelId.toString())
+                .setUserId(userId.toString())
+                .build());
+
+        if (!response.getData()) {
+            if (response.getStatus() == HttpStatus.BAD_REQUEST.value())
+                throw new BadRequestException(response.getMessage());
+            throw new ForbiddenException(response.getMessage());
+        }
+    }
+
+    private void checkCanAttachFiles(UUID userId, UUID channelId) {
+        CanUserAttachFilesResponse response = this.channelStub.canUserAttachFiles(CanUserAttachFilesRequest.newBuilder()
+                .setUserId(userId.toString())
+                .setChannelId(channelId.toString())
+                .build());
+
+        int status = response.getStatus();
+        if (status == HttpStatus.BAD_REQUEST.value())
+            throw new BadRequestException(response.getMessage());
+        if (status == HttpStatus.FORBIDDEN.value())
+            throw new ForbiddenException(response.getMessage());
+        if (status != HttpStatus.OK.value())
+            throw Status.INTERNAL.withDescription("CanUserAttachFiles returned status " + status + ": " + response.getMessage()).asRuntimeException();
     }
 
     public void deleteMessage(UUID userId, UUID messageId) {
@@ -229,15 +372,7 @@ public class MessageService {
         // the client never gets URLs for only some of its files.
         request.getFiles().forEach(this::validateAttachment);
 
-        CanUserAttachFilesResponse permissionCheckResponse = this.channelStub.canUserAttachFiles(CanUserAttachFilesRequest.newBuilder()
-                .setUserId(request.getUserId().toString())
-                .setChannelId(request.getChannelId().toString())
-                .build());
-
-        int status = permissionCheckResponse.getStatus();
-        if (status == HttpStatus.BAD_REQUEST.value()) throw new BadRequestException(permissionCheckResponse.getMessage());
-        if (status == HttpStatus.FORBIDDEN.value()) throw new ForbiddenException(permissionCheckResponse.getMessage());
-        if (status != HttpStatus.OK.value()) throw Status.INTERNAL.withDescription("CanUserAttachFile returned status" + status +": "+ permissionCheckResponse.getMessage()).asRuntimeException();
+        checkCanAttachFiles(request.getUserId(), request.getChannelId());
 
         CreateAttachmentResponse response = new CreateAttachmentResponse();
         List<CreateAttachmentResponse.AttachmentUpload> attachments = response.getAttachments();
@@ -257,28 +392,35 @@ public class MessageService {
      * checked with HeadObject when the key is attached to a message.
      */
     private void validateAttachment(CreateAttachmentRequest.AttachmentMetadata file) {
-        DataSize maxFileSize = this.storageProperties.maxFileSize();
-        if (file.size() > maxFileSize.toBytes()) {
-            throw new BadRequestException(file.fileName() + " is larger than the " + maxFileSize.toMegabytes() + "MB limit");
-        }
+        checkFileSize(file.fileName(), file.size());
+        checkContentType(file.fileName(), file.contentType());
+    }
 
+    private void checkFileSize(String fileName, long size) {
+        DataSize maxFileSize = this.storageProperties.maxFileSize();
+        if (size > maxFileSize.toBytes()) {
+            throw new BadRequestException(fileName + " is larger than the " + maxFileSize.toMegabytes() + "MB limit");
+        }
+    }
+
+    private void checkContentType(String fileName, String rawContentType) {
         MediaType contentType;
         try {
-            contentType = MediaType.parseMediaType(file.contentType());
+            contentType = MediaType.parseMediaType(rawContentType);
         } catch (InvalidMediaTypeException e) {
-            throw new BadRequestException(file.fileName() + " has an invalid content type");
+            throw new BadRequestException(fileName + " has an invalid content type");
         }
 
         // A wildcard like image/* is fine in the allowlist but meaningless as a file's own type,
         // and would be stored as the object's Content-Type.
         if (contentType.isWildcardType() || contentType.isWildcardSubtype()) {
-            throw new BadRequestException(file.fileName() + " must have a specific content type");
+            throw new BadRequestException(fileName + " must have a specific content type");
         }
 
         boolean allowed = this.storageProperties.allowedContentTypes().stream()
                 .anyMatch(allowedType -> allowedType.includes(contentType));
         if (!allowed) {
-            throw new BadRequestException(file.fileName() + " has a content type that isn't allowed");
+            throw new BadRequestException(fileName + " has a content type that isn't allowed");
         }
     }
 }
